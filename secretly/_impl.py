@@ -1,4 +1,3 @@
-
 from __future__ import unicode_literals, print_function
 
 import os
@@ -95,24 +94,99 @@ class SimpleAssuan(LineReceiver, object):
             self._dq.pop(0).errback(AssuanError(line))
 
 
+class PinentryNotFound(Exception):
+    """
+    Raised when a C{pinentry} program does not exist.
+    """
+
+
+@attr.s(frozen=True)
+class Pinentry(object):
+    """
+    A C{pinentry} that can prompt you for a password.
+
+    @ivar _name: The name of the C{pinentry} program.  Must be in C{PATH}
+        or an absolute path to an executable.
+    @type _name: L{str}
+
+    @ivar _argumentFactory: A callable that accepts no arguments and
+        returns C{argv[1:]}.  Can raise L{PinentryNotFound} or
+        L{OSError} to cause this C{pinentry} to be ignored.
+    @type _argumentFactory: L{callable}
+    """
+    _name = attr.ib()
+    _argumentFactory = attr.ib(default=lambda: [])
+
+    def argv(self, _which=which):
+        """
+        Return an argv list suitable for passing to
+        L{ProcessEndpoint}.
+
+        @return: An argv L{list} suitable for passing to
+            L{ProcessEndpoint}
+
+        @raises: L{PinentryNotFound} if the requested pinentry program
+        """
+        argv = _which(self._name)[:1]
+        if not argv:
+            raise PinentryNotFound(self._name)
+        argv.extend(self._argumentFactory())
+        return argv
+
+
+def ttynameArgument(
+        _stdout=sys.stdout.fileno(),
+):
+    """
+    C{pinentry-curses} requires C{--ttyname} be set to the process'
+    controlling terminal so it can draw its dialogs.  This function
+    either returns a list that sets C{--ttyname} to the terminal that
+    underlies the calling process' stdout or raises L{OSError} if
+    stdout has no terminal.
+    """
+    return ['--ttyname', os.ttyname(_stdout)]
+
+
+PINENTRIES = (
+    Pinentry('/usr/local/MacGPG2/libexec/pinentry-mac.app'
+           '/Contents/MacOS/pinentry-mac'),
+    Pinentry('pinentry-mac'),
+    Pinentry('pinentry-curses', argumentFactory=ttynameArgument),
+    Pinentry('pinentry'),
+)
+
+
+def choosePinentry(_pinentries=PINENTRIES):
+    """
+    Choose a C{pinentry} that can prompt you for a secret.
+
+    @return: An argv list suitable for passing to L{ProcessEndpoint}
+
+    @raises: L{RuntimeError} if no C{pinentry} is available.
+
+    @see:
+        U{https://www.gnupg.org/documentation/manuals/gnupg/Common-Problems.html}
+    """
+    for pinentry in _pinentries:
+        try:
+            return pinentry.argv()
+        except (PinentryNotFound, OSError):
+            continue
+    else:
+        raise RuntimeError(
+            "Cannot find a pinentry to prompt you for a secret.")
+
+
 @inlineCallbacks
-def askForPassword(reactor, prompt, title, description):
+def askForPassword(reactor, prompt, title, description, argv):
     """
     The documentation appears to be here only:
     https://github.com/gpg/pinentry/blob/287d40e879f767dbcb3d19b3629b872c08d39cf4/pinentry/pinentry.c#L1444-L1464
 
     TODO: multiple backends for password-prompting.
     """
-    executable = (
-        # It would be nice if there were a more general mechanism for this...
-        which('/usr/local/MacGPG2/libexec/pinentry-mac.app'
-              '/Contents/MacOS/pinentry-mac') +
-        which('pinentry-mac') +
-        which('pinentry')
-    )[0]
-    argv = [executable]
-    assuan = yield (ProcessEndpoint(reactor, executable, argv,
-                                    os.environ.copy())
+
+    assuan = yield (ProcessEndpoint(reactor, argv[0], argv, os.environ.copy())
                     .connect(Factory.forProtocol(SimpleAssuan)))
     try:
         yield assuan.issueCommand(b"SETPROMPT", prompt.encode("utf-8"))
@@ -127,7 +201,7 @@ def askForPassword(reactor, prompt, title, description):
 
 @inlineCallbacks
 def secretly(reactor, action, system=None, username=None,
-                    prompt="Password:"):
+             prompt="Password:"):
     """
     Call the given C{action} with a secret value.
 
@@ -149,7 +223,8 @@ def secretly(reactor, action, system=None, username=None,
             system, username,
             (yield askForPassword(reactor, prompt, "Enter Password",
                                   "Password Prompt for {username}@{system}"
-                                  .format(system=system, username=username)))
+                                  .format(system=system, username=username),
+                                  choosePinentry()))
         )
     yield maybeDeferred(action, secret)
 
