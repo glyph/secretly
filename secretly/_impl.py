@@ -16,6 +16,7 @@ from twisted.internet.defer import (
 from twisted.internet.endpoints import ProcessEndpoint
 from twisted.internet.protocol import Factory
 from twisted.internet.task import react, deferLater
+from twisted.internet.utils import getProcessOutputAndValue
 
 
 @attr.s
@@ -147,20 +148,24 @@ def ttynameArgument(
     return ['--ttyname', os.ttyname(_stdout)]
 
 
-PINENTRIES = (
-    Pinentry('/usr/local/MacGPG2/libexec/pinentry-mac.app'
-             '/Contents/MacOS/pinentry-mac'),
-    Pinentry('pinentry-mac'),
-    Pinentry('pinentry-curses'),
-    Pinentry('pinentry'),
-)
 
-if 'PINENTRY' in os.environ:
-    PINENTRIES = (
-        tuple([Pinentry(os.environ['PINENTRY'])]) + PINENTRIES
+@inlineCallbacks
+def call(exe, *argv):
+    """
+    Run a command, returning its output, or None if it fails.
+    """
+    exes = which(exe)
+    if not exes:
+        returnValue(None)
+    stdout, stderr, value = yield getProcessOutputAndValue(
+        exes[0], argv, env=os.environ.copy()
     )
+    if value:
+        returnValue(None)
+    returnValue(stdout.decode('utf-8').rstrip('\n'))
 
-def choosePinentry(_pinentries=PINENTRIES):
+@inlineCallbacks
+def choosePinentry():
     """
     Choose a C{pinentry} that can prompt you for a secret.
 
@@ -171,7 +176,28 @@ def choosePinentry(_pinentries=PINENTRIES):
     @see:
         U{https://www.gnupg.org/documentation/manuals/gnupg/Common-Problems.html}
     """
-    for pinentry in _pinentries:
+    pinentries = []
+    if 'PINENTRY' in os.environ:
+        pinentries.append(Pinentry(os.environ['PINENTRY']))
+    mgrd = yield call('launchctl', 'managername')
+    if mgrd == 'Aqua':
+        pinentries.extend([
+            Pinentry(
+                '/usr/local/MacGPG2/libexec/pinentry-mac.app'
+                '/Contents/MacOS/pinentry-mac'),
+            Pinentry('pinentry-mac'),
+        ])
+    if 'DISPLAY' in os.environ:
+        pinentries.extend([
+            Pinentry('pinentry-gnome3'),
+            Pinentry('pinentry-x11')
+        ])
+    pinentries.extend([
+        Pinentry('pinentry-curses'),
+        Pinentry('pinentry'),
+    ])
+
+    for pinentry in pinentries:
         try:
             return pinentry.argv()
         except (PinentryNotFound, OSError):
@@ -228,7 +254,7 @@ def secretly(reactor, action, system=None, username=None,
             (yield askForPassword(reactor, prompt, "Enter Password",
                                   "Password Prompt for {username}@{system}"
                                   .format(system=system, username=username),
-                                  choosePinentry()))
+                                  (yield choosePinentry())))
         )
     yield maybeDeferred(action, secret)
 
