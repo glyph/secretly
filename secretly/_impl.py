@@ -2,6 +2,7 @@ from __future__ import unicode_literals, print_function
 
 import os
 import sys
+import getpass
 
 import attr
 
@@ -135,6 +136,41 @@ class Pinentry(object):
         return argv
 
 
+    @inlineCallbacks
+    def askForPassword(self, reactor, prompt, title, description):
+        """
+        The documentation appears to be here only:
+        https://github.com/gpg/pinentry/blob/287d40e879f767dbcb3d19b3629b872c08d39cf4/pinentry/pinentry.c#L1444-L1464
+
+        TODO: multiple backends for password-prompting.
+        """
+        argv = self.argv()
+        assuan = yield (ProcessEndpoint(reactor, argv[0], argv,
+                                        os.environ.copy())
+                        .connect(Factory.forProtocol(SimpleAssuan)))
+        try:
+            yield assuan.issueCommand(b"SETPROMPT", prompt.encode("utf-8"))
+            yield assuan.issueCommand(b"SETTITLE", title.encode("utf-8"))
+            yield assuan.issueCommand(b"SETDESC", description.encode("utf-8"))
+            response = yield assuan.issueCommand(b"GETPIN")
+        finally:
+            assuan.issueCommand(b"BYE")
+        returnValue(response.data.decode("utf-8"))
+
+
+@attr.s
+class GetPassAsker(object):
+    """
+    Fallback implementation of L{Pinentry} that just blocks.
+    """
+
+    @inlineCallbacks
+    def askForPassword(self, reactor, prompt, title, description):
+        returnValue(
+            (yield getpass.getpass('\n'.join([description, prompt + " "])))
+        )
+
+
 def ttynameArgument(
         _stdout=sys.stdout.fileno(),
 ):
@@ -179,54 +215,34 @@ def choosePinentry():
     pinentries = []
     if 'PINENTRY' in os.environ:
         pinentries.append(Pinentry(os.environ['PINENTRY']))
-    mgrd = yield call('launchctl', 'managername')
-    if mgrd == 'Aqua':
+    else:
+        mgrd = yield call('launchctl', 'managername')
+        if mgrd == 'Aqua':
+            pinentries.extend([
+                Pinentry(
+                    '/usr/local/MacGPG2/libexec/pinentry-mac.app'
+                    '/Contents/MacOS/pinentry-mac'),
+                Pinentry('pinentry-mac'),
+            ])
+        if 'DISPLAY' in os.environ:
+            pinentries.extend([
+                Pinentry('pinentry-gnome3'),
+                Pinentry('pinentry-x11')
+            ])
         pinentries.extend([
-            Pinentry(
-                '/usr/local/MacGPG2/libexec/pinentry-mac.app'
-                '/Contents/MacOS/pinentry-mac'),
-            Pinentry('pinentry-mac'),
+            Pinentry('pinentry-curses'),
+            Pinentry('pinentry'),
         ])
-    if 'DISPLAY' in os.environ:
-        pinentries.extend([
-            Pinentry('pinentry-gnome3'),
-            Pinentry('pinentry-x11')
-        ])
-    pinentries.extend([
-        Pinentry('pinentry-curses'),
-        Pinentry('pinentry'),
-    ])
 
     for pinentry in pinentries:
         try:
-            return pinentry.argv()
+            pinentry.argv()
         except (PinentryNotFound, OSError):
             continue
+        else:
+            return pinentry
     else:
-        raise RuntimeError(
-            "Cannot find a pinentry to prompt you for a secret.")
-
-
-@inlineCallbacks
-def askForPassword(reactor, prompt, title, description, argv):
-    """
-    The documentation appears to be here only:
-    https://github.com/gpg/pinentry/blob/287d40e879f767dbcb3d19b3629b872c08d39cf4/pinentry/pinentry.c#L1444-L1464
-
-    TODO: multiple backends for password-prompting.
-    """
-
-    assuan = yield (ProcessEndpoint(reactor, argv[0], argv, os.environ.copy())
-                    .connect(Factory.forProtocol(SimpleAssuan)))
-    try:
-        yield assuan.issueCommand(b"SETPROMPT", prompt.encode("utf-8"))
-        yield assuan.issueCommand(b"SETTITLE", title.encode("utf-8"))
-        yield assuan.issueCommand(b"SETDESC", description.encode("utf-8"))
-        response = yield assuan.issueCommand(b"GETPIN")
-    finally:
-        assuan.issueCommand(b"BYE")
-    returnValue(response.data.decode("utf-8"))
-
+        return GetPassAsker()
 
 
 @inlineCallbacks
@@ -243,18 +259,18 @@ def secretly(reactor, action, system=None, username=None,
         if system == '__main__':
             system = os.path.abspath(sys.argv[0])
     if username is None:
-        from getpass import getuser
-        username = getuser()
+        username = getpass.getuser()
     while True:
         secret = keyring.get_password(system, username)
         if secret is not None:
             break
+        pinentry = yield choosePinentry()
         keyring.set_password(
             system, username,
-            (yield askForPassword(reactor, prompt, "Enter Password",
-                                  "Password Prompt for {username}@{system}"
-                                  .format(system=system, username=username),
-                                  (yield choosePinentry())))
+            (yield pinentry.askForPassword(
+                reactor, prompt, "Enter Password",
+                "Password Prompt for {username}@{system}"
+                .format(system=system, username=username)))
         )
     yield maybeDeferred(action, secret)
 
