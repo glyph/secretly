@@ -115,7 +115,7 @@ class Pinentry(object):
     @type _argumentFactory: L{callable}
     """
     _name = attr.ib()
-    _argumentFactory = attr.ib(default=lambda: [])
+    _argumentFactory = attr.ib(default=lambda: ttynameArgument())
 
     def argv(self, _which=which):
         """
@@ -149,12 +149,16 @@ def ttynameArgument(
 
 PINENTRIES = (
     Pinentry('/usr/local/MacGPG2/libexec/pinentry-mac.app'
-           '/Contents/MacOS/pinentry-mac'),
+             '/Contents/MacOS/pinentry-mac'),
     Pinentry('pinentry-mac'),
-    Pinentry('pinentry-curses', argumentFactory=ttynameArgument),
+    Pinentry('pinentry-curses'),
     Pinentry('pinentry'),
 )
 
+if 'PINENTRY' in os.environ:
+    PINENTRIES = (
+        tuple([Pinentry(os.environ['PINENTRY'])]) + PINENTRIES
+    )
 
 def choosePinentry(_pinentries=PINENTRIES):
     """
