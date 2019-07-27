@@ -1,0 +1,12 @@
+[build-system]
+requires = ["flit"]
+build-backend = "flit.buildapi"
+
+[tool.flit.metadata]
+module = "secretly"
+author = "Glyph"
+author-email = "glyph@twistedmatrix.com"
+home-page = "https://github.com/glyph/secretly"
+classifiers = ["License :: OSI Approved :: MIT License"]
+requires = ["attrs", "twisted", "keyring", "dbus-python; 'linux' in sys_platform"]
+
