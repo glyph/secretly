@@ -9,11 +9,11 @@ import attr
 import keyring
 
 from twisted.python.procutils import which
+from twisted.python.modules import getModule
 
 from twisted.protocols.basic import LineReceiver
 
-from twisted.internet.defer import (
-    Deferred, maybeDeferred, inlineCallbacks, returnValue)
+from twisted.internet.defer import Deferred, maybeDeferred, inlineCallbacks, returnValue
 from twisted.internet.endpoints import ProcessEndpoint
 from twisted.internet.protocol import Factory
 from twisted.internet.task import react, deferLater
@@ -25,9 +25,9 @@ class AssuanResponse(object):
     """
     Record encapsulating a response from pinentry.
     """
+
     data = attr.ib()
     debugInfo = attr.ib()
-
 
 
 class AssuanError(Exception):
@@ -37,12 +37,12 @@ class AssuanError(Exception):
     """
 
 
-
 class SimpleAssuan(LineReceiver, object):
     """
     Simple Assuan protocol speaker.
     """
-    delimiter = b'\n'
+
+    delimiter = b"\n"
 
     def __init__(self):
         self._ready = False
@@ -66,21 +66,19 @@ class SimpleAssuan(LineReceiver, object):
         self.sendLine(b" ".join([command] + list(args)))
         return result
 
-
     def _currentResponse(self, debugInfo):
         """
         Pull the current response off the queue.
         """
-        bd = b''.join(self._bufferedData)
+        bd = b"".join(self._bufferedData)
         self._bufferedData = []
         return AssuanResponse(bd, debugInfo)
-
 
     def lineReceived(self, line):
         """
         A line was received.
         """
-        if line.startswith(b"#"): # ignore it
+        if line.startswith(b"#"):  # ignore it
             return
         if line.startswith(b"OK"):
             # if no command issued, then just 'ready'
@@ -89,9 +87,12 @@ class SimpleAssuan(LineReceiver, object):
             else:
                 self._ready = True
         if line.startswith(b"D "):
-            self._bufferedData.append(line[2:].replace(b"%0A", b"\r")
-                                      .replace(b"%0D", b"\n")
-                                      .replace(b"%25", b"%"))
+            self._bufferedData.append(
+                line[2:]
+                .replace(b"%0A", b"\r")
+                .replace(b"%0D", b"\n")
+                .replace(b"%25", b"%")
+            )
         if line.startswith(b"ERR"):
             self._dq.pop(0).errback(AssuanError(line))
 
@@ -116,6 +117,7 @@ class Pinentry(object):
         L{OSError} to cause this C{pinentry} to be ignored.
     @type _argumentFactory: L{callable}
     """
+
     _name = attr.ib()
     _argumentFactory = attr.ib(default=lambda: ttynameArgument())
 
@@ -135,7 +137,6 @@ class Pinentry(object):
         argv.extend(self._argumentFactory())
         return argv
 
-
     @inlineCallbacks
     def askForPassword(self, reactor, prompt, title, description):
         """
@@ -145,9 +146,11 @@ class Pinentry(object):
         TODO: multiple backends for password-prompting.
         """
         argv = self.argv()
-        assuan = yield (ProcessEndpoint(reactor, argv[0], argv,
-                                        os.environ.copy())
-                        .connect(Factory.forProtocol(SimpleAssuan)))
+        assuan = yield (
+            ProcessEndpoint(reactor, argv[0], argv, os.environ.copy()).connect(
+                Factory.forProtocol(SimpleAssuan)
+            )
+        )
         try:
             yield assuan.issueCommand(b"SETPROMPT", prompt.encode("utf-8"))
             yield assuan.issueCommand(b"SETTITLE", title.encode("utf-8"))
@@ -158,6 +161,28 @@ class Pinentry(object):
         returnValue(response.data.decode("utf-8"))
 
 
+class AppleScriptAsker:
+    """
+    Implementation of L{Pinentry} that uses applescript to display a dialog.
+    """
+
+    def argv(self):
+        return []
+
+    @inlineCallbacks
+    def askForPassword(self, reactor, prompt, title, description):
+        returnValue(
+            (
+                yield call(
+                    "osascript",
+                    getModule(__name__).filePath.sibling("pinentry.scpt").path,
+                    description + "\n\n" + prompt,
+                    title,
+                )
+            )
+        )
+
+
 @attr.s
 class GetPassAsker(object):
     """
@@ -166,14 +191,10 @@ class GetPassAsker(object):
 
     @inlineCallbacks
     def askForPassword(self, reactor, prompt, title, description):
-        returnValue(
-            (yield getpass.getpass('\n'.join([description, prompt + " "])))
-        )
+        returnValue((yield getpass.getpass("\n".join([description, prompt + " "]))))
 
 
-def ttynameArgument(
-        _stdout=sys.stdout.fileno(),
-):
+def ttynameArgument(_stdout=sys.stdout.fileno(),):
     """
     C{pinentry-curses} requires C{--ttyname} be set to the process'
     controlling terminal so it can draw its dialogs.  This function
@@ -181,8 +202,7 @@ def ttynameArgument(
     underlies the calling process' stdout or raises L{OSError} if
     stdout has no terminal.
     """
-    return ['--ttyname', os.ttyname(_stdout)]
-
+    return ["--ttyname", os.ttyname(_stdout)]
 
 
 @inlineCallbacks
@@ -198,7 +218,8 @@ def call(exe, *argv):
     )
     if value:
         returnValue(None)
-    returnValue(stdout.decode('utf-8').rstrip('\n'))
+    returnValue(stdout.decode("utf-8").rstrip("\n"))
+
 
 @inlineCallbacks
 def choosePinentry():
@@ -213,26 +234,26 @@ def choosePinentry():
         U{https://www.gnupg.org/documentation/manuals/gnupg/Common-Problems.html}
     """
     pinentries = []
-    if 'PINENTRY' in os.environ:
-        pinentries.append(Pinentry(os.environ['PINENTRY']))
+    if "PINENTRY" in os.environ:
+        pinentries.append(Pinentry(os.environ["PINENTRY"]))
     else:
-        mgrd = yield call('launchctl', 'managername')
-        if mgrd == 'Aqua':
-            pinentries.extend([
-                Pinentry(
-                    '/usr/local/MacGPG2/libexec/pinentry-mac.app'
-                    '/Contents/MacOS/pinentry-mac'),
-                Pinentry('pinentry-mac'),
-            ])
-        if 'DISPLAY' in os.environ:
-            pinentries.extend([
-                Pinentry('pinentry-gnome3'),
-                Pinentry('pinentry-x11')
-            ])
-        pinentries.extend([
-            Pinentry('pinentry-curses'),
-            Pinentry('pinentry'),
-        ])
+        mgrd = yield call("launchctl", "managername")
+        if mgrd == "Aqua":
+            pinentries.extend(
+                [
+                    AppleScriptAsker(),
+                    Pinentry(
+                        "/usr/local/MacGPG2/libexec/pinentry-mac.app"
+                        "/Contents/MacOS/pinentry-mac"
+                    ),
+                    Pinentry("pinentry-mac"),
+                ]
+            )
+        if "DISPLAY" in os.environ:
+            pinentries.extend([Pinentry("pinentry-gnome3"), Pinentry("pinentry-x11")])
+        pinentries.extend(
+            [Pinentry("pinentry-curses"), Pinentry("pinentry"),]
+        )
 
     for pinentry in pinentries:
         try:
@@ -246,8 +267,7 @@ def choosePinentry():
 
 
 @inlineCallbacks
-def secretly(reactor, action, system=None, username=None,
-             prompt="Password:"):
+def secretly(reactor, action, system=None, username=None, prompt="Password:"):
     """
     Call the given C{action} with a secret value.
 
@@ -256,7 +276,7 @@ def secretly(reactor, action, system=None, username=None,
     """
     if system is None:
         system = action.__module__
-        if system == '__main__':
+        if system == "__main__":
             system = os.path.abspath(sys.argv[0])
     if username is None:
         username = getpass.getuser()
@@ -266,18 +286,26 @@ def secretly(reactor, action, system=None, username=None,
             break
         pinentry = yield choosePinentry()
         keyring.set_password(
-            system, username,
-            (yield pinentry.askForPassword(
-                reactor, prompt, "Enter Password",
-                "Password Prompt for {username}@{system}"
-                .format(system=system, username=username)))
+            system,
+            username,
+            (
+                yield pinentry.askForPassword(
+                    reactor,
+                    prompt,
+                    "Enter Password",
+                    "Password Prompt for {username}@{system}".format(
+                        system=system, username=username
+                    ),
+                )
+            ),
         )
     yield maybeDeferred(action, secret)
 
 
+if __name__ == "__main__":
 
-if __name__ == '__main__':
     @react
     def main(reactor):
-        return secretly(reactor, lambda pw: deferLater(reactor, 3.0, print,
-                                                       'pw:', pw))
+        return secretly(
+            reactor, lambda pw: deferLater(reactor, 3.0, lambda: print("pw:", repr(pw)))
+        )
